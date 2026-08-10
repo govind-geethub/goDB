@@ -41,6 +41,7 @@ func NewPager(filename string) (*Pager, error) {
 // ReadPage feteches specific 4KB page from the disk by PageID
 func (p *Pager) ReadPage(pageID uint32) (*Page, error) {
 	var page Page
+	// page0 at 0, page1 at 4096...
 	offset := int64(pageID) * PageSize
 
 	// if req page is out of bounds return blank
@@ -55,4 +56,32 @@ func (p *Pager) ReadPage(pageID uint32) (*Page, error) {
 	}
 
 	return &page, nil
+}
+
+// WritePage writes the 4KB page from RAM to physical file
+func (p *Pager) WritePage(pageID uint32, page *Page) error {
+	offset := int64(pageID) * PageSize
+
+	// write 4096 bytes directly at disk byte offset
+	_, err := p.file.WriteAt(page[:], offset)
+	if err != nil {
+		return fmt.Errorf("Failed to write page %d to disk: %w", pageID, err)
+	}
+
+	// if new written page extends from the last  it gives the new byte boundary
+	if offset+PageSize > p.fileSize {
+		p.fileSize = offset + PageSize
+	}
+
+	return nil
+}
+
+// Close func gives out all the unwritten OS buffers and safely closes DB file
+func (p *Pager) Close() error {
+	// saves the file info from the OS RAM cache memory to physcial disk
+	err := p.file.Sync()
+	if err != nil {
+		return fmt.Errorf("Failed to sync file to disk: %w", err)
+	}
+	return p.file.Close()
 }
