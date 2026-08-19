@@ -6,68 +6,69 @@ import (
 )
 
 func main() {
-	// 1. Initialize or open your pager database file
-	pager, err := NewPager("db.bin")
+	pager, err := NewPager("test_btree.db")
 	if err != nil {
-		log.Fatalf("Failed to initialize pager: %v", err)
+		log.Fatalf("Failed to initialize pager: %w", err)
 	}
 	defer pager.Close()
 
-	// 2. Fetch or initialize Page 0 (Leaf Node)
-	pageID := uint32(0)
-	page, err := pager.ReadPage(pageID)
+	page0, err := pager.ReadPage(0)
 	if err != nil {
-		log.Fatalf("Failed to read page %d: %v", pageID, err)
+		log.Fatalf("failed to read page 0: %v", err)
 	}
 
-	// Initialize header if it's a fresh page
-	if GetNodeType(page) == 0 {
-		SetNodeType(page, NodeTypeLeaf)
-		SetNumKeys(page, 0)
-		SetNextPage(page, 0)
+	// initalize page 0 as Leaf if its New (0 Keys)
+	if GetNumKeys(page0) == 0 {
+		SetNodeType(page0, NodeTypeLeaf)
 	}
 
-	// 3. Insert rows into the leaf node until full
-	// (Max capacity = 14 rows for 4096-byte page with 291-byte rows)
-	for i := uint32(1); i <= 14; i++ {
-		row := &Row{
+	// insert 15 rows (1 -> 15) to trigger page split on the 15th row
+	fmt.Println("Inserting 15 rows into the database...")
+	for i := uint32(1); i <= 15; i++ {
+		row := Row{
 			ID:       i,
-			UserName: fmt.Sprintf("user%d", i),
-			Email:    fmt.Sprintf("user%d@example.com", i),
+			UserName: fmt.Sprintf("User_%d", i),
+			Email:    fmt.Sprintf("user_%d@gmail.com", i),
 		}
 
-		if err := LeafNodeInsert(page, row); err != nil {
-			log.Fatalf("Failed to insert row ID %d: %v", i, err)
+		// reload page 0 fresh
+		p0, err := pager.ReadPage(0)
+		if err != nil {
+			log.Fatalf("Failed to read page 0: %v", err)
 		}
-		fmt.Printf("Inserted Row ID %d into Page %d (Total Keys: %d)\n", row.ID, pageID, GetNumKeys(page))
+
+		// insert or split
+		err = LeafNodeInsertOrSplit(pager, 0, p0, &row)
+		if err != nil {
+			log.Fatalf("failed on row %d: %v", i, err)
+		}
+
+		// persist the changes back to disk
+		err = pager.WritePage(0, p0)
+		if err != nil {
+			log.Fatalf("Failed to save page 0 state to disl: %v", err)
+		}
 	}
 
-	// Save full page back to disk
-	if err := pager.WritePage(pageID, page); err != nil {
-		log.Fatalf("Failed to write page: %v", err)
+	// verify page 0 contents
+	p0, _ := pager.ReadPage(0)
+	keysP0 := GetNumKeys(p0)
+	nextP0 := GetNextPage(p0)
+	fmt.Printf("\n --- Page 0 (Keys: %d, Next Page: %d) --- \n", keysP0, nextP0)
+	for i := uint16(0); i < keysP0; i++ {
+		offset := NodeHeaderSize + (uint32(i) * RowSize)
+		r, _ := Deserialize(p0[offset : offset+RowSize])
+		fmt.Printf("Slot %d -> ID: %d, User: %s\n", i, r.ID, r.UserName)
 	}
 
-	// 4. Trigger LeafNodeSplit when attempting to insert the 15th row
-	newRow := &Row{
-		ID:       15,
-		UserName: "user15",
-		Email:    "user15@example.com",
+	// verify page 1 contents (new sibling)
+	p1, _ := pager.ReadPage(1)
+	keysP1 := GetNumKeys(p1)
+	nextP1 := GetNextPage(p1)
+	fmt.Printf("\n --- Page 1 (Keys: %d, Next Page: %d) ---\n", keysP1, nextP1)
+	for i := uint16(0); i < keysP1; i++ {
+		offset := NodeHeaderSize + (uint32(i) * RowSize)
+		r, _ := Deserialize(p1[offset : offset+RowSize])
+		fmt.Printf("Slot %d -> ID: %d, User: %s\n", i, r.ID, r.UserName)
 	}
-
-	fmt.Println("\nAttempting 15th insertion (Page Full) -> Splitting Page...")
-
-	newPageID, err := LeafNodeSplit(pager, pageID, page, newRow)
-	if err != nil {
-		log.Fatalf("Failed to split page: %v", err)
-	}
-
-	// 5. Verify split results
-	newPage, err := pager.ReadPage(newPageID)
-	if err != nil {
-		log.Fatalf("Failed to read newly allocated split page: %v", err)
-	}
-
-	fmt.Printf("\n--- Split Complete ---\n")
-	fmt.Printf("Old Page ID %d Keys: %d (Next Page -> %d)\n", pageID, GetNumKeys(page), GetNextPage(page))
-	fmt.Printf("New Page ID %d Keys: %d (Next Page -> %d)\n", newPageID, GetNumKeys(newPage), GetNextPage(newPage))
 }

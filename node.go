@@ -105,6 +105,20 @@ func LeafNodeInsert(page *Page, row *Row) error {
 	return nil
 }
 
+// LeafNodeInsert places a row into a leaf page. If the page is full, it triggers LeafNodeSplit.
+func LeafNodeInsertOrSplit(pager *Pager, pageID uint32, page *Page, row *Row) error {
+	numKeys := GetNumKeys(page)
+	maxKeys := uint16((PageSize - NodeHeaderSize) / RowSize) // 14
+
+	if numKeys >= maxKeys {
+		// LeafNodeSplit internal logic writes both oldPage and newPage to disk
+		_, err := LeafNodeSplit(pager, pageID, page, row)
+		return err
+	}
+
+	return LeafNodeInsert(page, row)
+}
+
 func GetNextPage(page *Page) uint32 {
 	return binary.LittleEndian.Uint32(page[HeaderNextOffset : HeaderNextOffset+4])
 }
