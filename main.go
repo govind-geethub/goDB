@@ -8,7 +8,7 @@ import (
 func main() {
 	pager, err := NewPager("test_btree.db")
 	if err != nil {
-		log.Fatalf("Failed to initialize pager: %w", err)
+		log.Fatalf("Failed to initialize pager: %v", err)
 	}
 	defer pager.Close()
 
