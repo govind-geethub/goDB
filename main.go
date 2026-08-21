@@ -19,6 +19,7 @@ func main() {
 
 	if GetNumKeys(page0) == 0 {
 		SetNodeType(page0, NodeTypeLeaf)
+		_ = pager.WritePage(0, page0)
 	}
 
 	// Insert 15 rows to trigger a split on the 15th key
@@ -35,21 +36,13 @@ func main() {
 			log.Fatalf("Failed to read page 0 for row %d: %v", i, err)
 		}
 
-		// LeafNodeInsertOrSplit updates disk & reloads p0 if a split occurs
 		err = LeafNodeInsertOrSplit(pager, 0, p0, &row)
 		if err != nil {
 			log.Fatalf("Failed on row %d: %v", i, err)
 		}
-
-		// If no split occurred, write the updated page back to disk
-		if GetNumKeys(p0) < 14 {
-			_ = pager.WritePage(0, p0)
-		}
 	}
 
 	// Create Page 2 as the Internal Root Node
-	// Left child: Page 0 (IDs 1–7)
-	// Right child: Page 1 (IDs 8–15)
 	rootPageID := uint32(2)
 	splitKey := uint32(8)
 

@@ -20,24 +20,28 @@ const (
 	NodeHeaderSize   = 8 // total bytes reserved for page metadata
 )
 
-// GetNodeType returns the type of node (Internal or Leaf)
 func GetNodeType(page *Page) byte {
 	return page[HeaderTypeOffset]
 }
 
-// SetNodeType sets the node type byte of a page
 func SetNodeType(page *Page, nodeType byte) {
 	page[HeaderTypeOffset] = nodeType
 }
 
-// GetNumKeys extracts 16-bit key counter from page header
 func GetNumKeys(page *Page) uint16 {
 	return binary.LittleEndian.Uint16(page[HeaderKeysOffset : HeaderKeysOffset+2])
 }
 
-// SetNumKeys updates the 16-bit key counter in the page header
 func SetNumKeys(page *Page, numKeys uint16) {
 	binary.LittleEndian.PutUint16(page[HeaderKeysOffset:HeaderKeysOffset+2], numKeys)
+}
+
+func GetNextPage(page *Page) uint32 {
+	return binary.LittleEndian.Uint32(page[HeaderNextOffset : HeaderNextOffset+4])
+}
+
+func SetNextPage(page *Page, nextPageID uint32) {
+	binary.LittleEndian.PutUint32(page[HeaderNextOffset:HeaderNextOffset+4], nextPageID)
 }
 
 // LeafNodeSearch finds slot index via binary search
@@ -52,11 +56,7 @@ func LeafNodeSearch(page *Page, key uint32) (uint16, bool) {
 
 	for low < high {
 		mid := (low + high) / 2
-
-		// calc byte offset for mid inside the page
 		offset := NodeHeaderSize + (uint32(mid) * RowSize)
-
-		// extract 4-byte ID
 		rowID := binary.LittleEndian.Uint32(page[offset : offset+4])
 
 		if rowID == key {
@@ -73,7 +73,7 @@ func LeafNodeSearch(page *Page, key uint32) (uint16, bool) {
 
 func LeafNodeInsert(page *Page, row *Row) error {
 	numKeys := GetNumKeys(page)
-	maxKeys := uint16((PageSize - NodeHeaderSize) / RowSize) // (4096 - 8) / 291 = 14 rows
+	maxKeys := uint16((PageSize - NodeHeaderSize) / RowSize) // 14 rows
 
 	if numKeys >= maxKeys {
 		return fmt.Errorf("page full: cannot insert into Leaf Node")
@@ -81,15 +81,15 @@ func LeafNodeInsert(page *Page, row *Row) error {
 
 	slot, found := LeafNodeSearch(page, row.ID)
 	if found {
-		return fmt.Errorf("Duplicate key error: primary key %d already exists", row.ID)
+		return fmt.Errorf("duplicate key error: primary key %d already exists", row.ID)
 	}
 
 	rowData, err := row.Serialize()
 	if err != nil {
-		return fmt.Errorf("Failed to serialize row: %w", err)
+		return fmt.Errorf("failed to serialize row: %w", err)
 	}
 
-	// Shift existing rows to right in a single copy call
+	// Shift existing rows right
 	if slot < numKeys {
 		srcOffset := NodeHeaderSize + (uint32(slot) * RowSize)
 		dstOffset := NodeHeaderSize + (uint32(slot+1) * RowSize)
@@ -97,7 +97,6 @@ func LeafNodeInsert(page *Page, row *Row) error {
 		copy(page[dstOffset:dstOffset+bytesToMove], page[srcOffset:srcOffset+bytesToMove])
 	}
 
-	// Copy new row into designated slot
 	targetOffset := NodeHeaderSize + (uint32(slot) * RowSize)
 	copy(page[targetOffset:targetOffset+RowSize], rowData[:])
 
@@ -105,19 +104,16 @@ func LeafNodeInsert(page *Page, row *Row) error {
 	return nil
 }
 
-// LeafNodeInsertOrSplit places a row into a leaf page. If the page is full, it triggers LeafNodeSplit.
 func LeafNodeInsertOrSplit(pager *Pager, pageID uint32, page *Page, row *Row) error {
 	numKeys := GetNumKeys(page)
-	maxKeys := uint16((PageSize - NodeHeaderSize) / RowSize) // 14
+	maxKeys := uint16((PageSize - NodeHeaderSize) / RowSize)
 
 	if numKeys >= maxKeys {
-		// LeafNodeSplit updates oldPage and newPage on disk
 		_, err := LeafNodeSplit(pager, pageID, page, row)
 		if err != nil {
 			return err
 		}
 
-		// Reload page memory so caller has the split state
 		updatedPage, err := pager.ReadPage(pageID)
 		if err != nil {
 			return err
@@ -126,18 +122,13 @@ func LeafNodeInsertOrSplit(pager *Pager, pageID uint32, page *Page, row *Row) er
 		return nil
 	}
 
-	return LeafNodeInsert(page, row)
+	err := LeafNodeInsert(page, row)
+	if err != nil {
+		return err
+	}
+	return pager.WritePage(pageID, page)
 }
 
-func GetNextPage(page *Page) uint32 {
-	return binary.LittleEndian.Uint32(page[HeaderNextOffset : HeaderNextOffset+4])
-}
-
-func SetNextPage(page *Page, nextPageID uint32) {
-	binary.LittleEndian.PutUint32(page[HeaderNextOffset:HeaderNextOffset+4], nextPageID)
-}
-
-// LeafNodeSplit splits a full leaf node into two 50/50 nodes
 func LeafNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newRow *Row) (uint32, error) {
 	numKeys := GetNumKeys(oldPage)
 
@@ -147,71 +138,70 @@ func LeafNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newRow *Row) (
 		offset := NodeHeaderSize + (uint32(i) * RowSize)
 		r, err := Deserialize(oldPage[offset : offset+RowSize])
 		if err != nil {
-			return 0, fmt.Errorf("Failed to deserialize row during splitting: %w", err)
+			return 0, fmt.Errorf("failed to deserialize row during splitting: %w", err)
 		}
 		rows = append(rows, *r)
 	}
 
-	// Insert 15th row in sorted order
+	// Insert new row into sorted array
 	inserted := false
 	for i, r := range rows {
 		if newRow.ID == r.ID {
-			return 0, fmt.Errorf("Duplicate key error: primary key %d already exists", newRow.ID)
+			return 0, fmt.Errorf("duplicate key error: primary key %d already exists", newRow.ID)
 		}
-
 		if newRow.ID < r.ID {
 			rows = append(rows[:i], append([]Row{*newRow}, rows[i:]...)...)
 			inserted = true
 			break
 		}
 	}
-
 	if !inserted {
 		rows = append(rows, *newRow)
 	}
 
-	// Allocate new page for right sibling
+	// Allocate new right page
 	newPageID := uint32(pager.fileSize / PageSize)
 	newPage, err := pager.ReadPage(newPageID)
 	if err != nil {
-		return 0, fmt.Errorf("Failed to allocate new page for split: %w", err)
+		return 0, fmt.Errorf("failed to allocate new page for split: %w", err)
 	}
 
+	// Setup new page metadata
 	SetNodeType(newPage, NodeTypeLeaf)
 	SetNumKeys(newPage, 0)
-
-	// Linked list pointers for leaf nodes
 	SetNextPage(newPage, GetNextPage(oldPage))
+
+	// Link old page to new page
 	SetNextPage(oldPage, newPageID)
 
-	// Split 15 rows: 7 in old Page, 8 in new Page
-	mid := 7
-
-	// Clear payload memory of old page
-	clear(oldPage[NodeHeaderSize:])
+	// Clear old page payload (keep header bytes 0–7 intact)
+	for i := NodeHeaderSize; i < PageSize; i++ {
+		oldPage[i] = 0
+	}
+	SetNodeType(oldPage, NodeTypeLeaf)
 	SetNumKeys(oldPage, 0)
 
-	// Populate left half
+	// Split 15 rows: 7 in left page, 8 in right page
+	mid := 7
+
 	for i := 0; i < mid; i++ {
 		if err := LeafNodeInsert(oldPage, &rows[i]); err != nil {
-			return 0, fmt.Errorf("Failed writing to old Page during split: %w", err)
+			return 0, fmt.Errorf("failed writing to old Page during split: %w", err)
 		}
 	}
 
-	// Populate right half
 	for i := mid; i < len(rows); i++ {
 		if err := LeafNodeInsert(newPage, &rows[i]); err != nil {
-			return 0, fmt.Errorf("Failed writing to new Page during split: %w", err)
+			return 0, fmt.Errorf("failed writing to new Page during split: %w", err)
 		}
 	}
 
-	// Write both back to disk
 	if err := pager.WritePage(oldPageID, oldPage); err != nil {
-		return 0, fmt.Errorf("Failed to write old page: %w", err)
+		return 0, fmt.Errorf("failed to write old page: %w", err)
 	}
 
 	if err := pager.WritePage(newPageID, newPage); err != nil {
-		return 0, fmt.Errorf("Failed to write new page: %w", err)
+		return 0, fmt.Errorf("failed to write new page: %w", err)
 	}
 
 	return newPageID, nil
@@ -221,36 +211,31 @@ func LeafNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newRow *Row) (
 const (
 	InternalNodeKeySize   = 4
 	InternalNodeChildSize = 4
-	MaxInternalChildren   = 3 // Max child pointers an internal node page can reserve
+	MaxInternalChildren   = 3
 )
 
-// InternalNodeChild returns the page ID of child pointer at index childNum
 func InternalNodeChild(page *Page, childNum uint16) uint32 {
 	offset := NodeHeaderSize + (uint32(childNum) * InternalNodeChildSize)
 	return binary.LittleEndian.Uint32(page[offset : offset+InternalNodeChildSize])
 }
 
-// SetInternalNodeChild updates child pointer at index childNum
 func SetInternalNodeChild(page *Page, childNum uint16, childPageID uint32) {
 	offset := NodeHeaderSize + (uint32(childNum) * InternalNodeChildSize)
 	binary.LittleEndian.PutUint32(page[offset:offset+InternalNodeChildSize], childPageID)
 }
 
-// InternalNodeKey returns the separator key at index keyNum
 func InternalNodeKey(page *Page, keyNum uint16) uint32 {
 	childrenSectionSize := uint32(MaxInternalChildren) * InternalNodeChildSize
 	keyOffset := NodeHeaderSize + childrenSectionSize + (uint32(keyNum) * InternalNodeKeySize)
 	return binary.LittleEndian.Uint32(page[keyOffset : keyOffset+InternalNodeKeySize])
 }
 
-// SetInternalNodeKey updates the separator key at index keyNum
 func SetInternalNodeKey(page *Page, keyNum uint16, key uint32) {
 	childrenSectionSize := uint32(MaxInternalChildren) * InternalNodeChildSize
 	keyOffset := NodeHeaderSize + childrenSectionSize + (uint32(keyNum) * InternalNodeKeySize)
 	binary.LittleEndian.PutUint32(page[keyOffset:keyOffset+InternalNodeKeySize], key)
 }
 
-// InternalNodeFindChild returns the child Page ID containing target key using Binary Search
 func InternalNodeFindChild(page *Page, key uint32) uint32 {
 	numKeys := GetNumKeys(page)
 
@@ -261,17 +246,16 @@ func InternalNodeFindChild(page *Page, key uint32) uint32 {
 		mid := (low + high) / 2
 		k := InternalNodeKey(page, mid)
 
-		if k <= key {
-			low = mid + 1
-		} else {
+		if key < k {
 			high = mid
+		} else {
+			low = mid + 1
 		}
 	}
 
 	return InternalNodeChild(page, low)
 }
 
-// CreateRootNode initialises a new internal root page pointing to left and right child pages
 func CreateRootNode(pager *Pager, rootPageID uint32, leftChildID uint32, rightChildID uint32, splitKey uint32) error {
 	rootPage, err := pager.ReadPage(rootPageID)
 	if err != nil {
@@ -288,7 +272,6 @@ func CreateRootNode(pager *Pager, rootPageID uint32, leftChildID uint32, rightCh
 	return pager.WritePage(rootPageID, rootPage)
 }
 
-// BTreeSearch traverses from an internal node down to a leaf node to retrieve target row
 func BTreeSearch(pager *Pager, pageID uint32, key uint32) (*Row, error) {
 	page, err := pager.ReadPage(pageID)
 	if err != nil {
@@ -308,12 +291,15 @@ func BTreeSearch(pager *Pager, pageID uint32, key uint32) (*Row, error) {
 	}
 
 	// Recursive Case: Internal Node
-	childPageID := InternalNodeFindChild(page, key)
+	if nodeType == NodeTypeInternal {
+		childPageID := InternalNodeFindChild(page, key)
 
-	// Guard against infinite recursive loops
-	if childPageID == pageID {
-		return nil, fmt.Errorf("invalid routing: child page ID matches parent page ID %d", pageID)
+		if childPageID == pageID {
+			return nil, fmt.Errorf("invalid routing: child page ID matches parent page ID %d", pageID)
+		}
+
+		return BTreeSearch(pager, childPageID, key)
 	}
 
-	return BTreeSearch(pager, childPageID, key)
+	return nil, fmt.Errorf("unknown node type %d on page %d", nodeType, pageID)
 }
