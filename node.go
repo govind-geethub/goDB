@@ -105,15 +105,25 @@ func LeafNodeInsert(page *Page, row *Row) error {
 	return nil
 }
 
-// LeafNodeInsert places a row into a leaf page. If the page is full, it triggers LeafNodeSplit.
+// LeafNodeInsertOrSplit places a row into a leaf page. If the page is full, it triggers LeafNodeSplit.
 func LeafNodeInsertOrSplit(pager *Pager, pageID uint32, page *Page, row *Row) error {
 	numKeys := GetNumKeys(page)
 	maxKeys := uint16((PageSize - NodeHeaderSize) / RowSize) // 14
 
 	if numKeys >= maxKeys {
-		// LeafNodeSplit internal logic writes both oldPage and newPage to disk
+		// LeafNodeSplit updates oldPage and newPage on disk
 		_, err := LeafNodeSplit(pager, pageID, page, row)
-		return err
+		if err != nil {
+			return err
+		}
+
+		// Reload page memory so caller has the split state
+		updatedPage, err := pager.ReadPage(pageID)
+		if err != nil {
+			return err
+		}
+		copy(page[:], updatedPage[:])
+		return nil
 	}
 
 	return LeafNodeInsert(page, row)
@@ -207,21 +217,15 @@ func LeafNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newRow *Row) (
 	return newPageID, nil
 }
 
-// internal load layouts
-// header: 8 bytes(type, reserved, numKeys, nextPage)
+// Internal node layout configurations
 const (
 	InternalNodeKeySize   = 4
 	InternalNodeChildSize = 4
+	MaxInternalChildren   = 3 // Max child pointers an internal node page can reserve
 )
 
-// internalNodeChild returns the page ID of child pointer at index childNum
+// InternalNodeChild returns the page ID of child pointer at index childNum
 func InternalNodeChild(page *Page, childNum uint16) uint32 {
-	numKeys := GetNumKeys(page)
-	if childNum > numKeys {
-		panic(fmt.Sprintf("childNum %d out of bounds for numKeys %d", childNum, numKeys))
-	}
-
-	// children array starts right after the 8 byte header
 	offset := NodeHeaderSize + (uint32(childNum) * InternalNodeChildSize)
 	return binary.LittleEndian.Uint32(page[offset : offset+InternalNodeChildSize])
 }
@@ -232,22 +236,24 @@ func SetInternalNodeChild(page *Page, childNum uint16, childPageID uint32) {
 	binary.LittleEndian.PutUint32(page[offset:offset+InternalNodeChildSize], childPageID)
 }
 
-// internalNodeKey return the separator key at index keyNum
+// InternalNodeKey returns the separator key at index keyNum
 func InternalNodeKey(page *Page, keyNum uint16) uint32 {
-	numKeys := GetNumKeys(page)
-
-	// Keys array starts after header + children pointers
-	// max children = max keys + 1
-	childrenOffset := NodeHeaderSize + (uint32(numKeys+1) * InternalNodeChildSize)
-	keyOffset := childrenOffset + (uint32(keyNum) * InternalNodeKeySize)
+	childrenSectionSize := uint32(MaxInternalChildren) * InternalNodeChildSize
+	keyOffset := NodeHeaderSize + childrenSectionSize + (uint32(keyNum) * InternalNodeKeySize)
 	return binary.LittleEndian.Uint32(page[keyOffset : keyOffset+InternalNodeKeySize])
 }
 
-// InternalNodeFindChildSize returns the page ID that contains the taregt key
-func InternalNodeFindChildSize(page *Page, key uint32) uint32 {
+// SetInternalNodeKey updates the separator key at index keyNum
+func SetInternalNodeKey(page *Page, keyNum uint16, key uint32) {
+	childrenSectionSize := uint32(MaxInternalChildren) * InternalNodeChildSize
+	keyOffset := NodeHeaderSize + childrenSectionSize + (uint32(keyNum) * InternalNodeKeySize)
+	binary.LittleEndian.PutUint32(page[keyOffset:keyOffset+InternalNodeKeySize], key)
+}
+
+// InternalNodeFindChild returns the child Page ID containing target key using Binary Search
+func InternalNodeFindChild(page *Page, key uint32) uint32 {
 	numKeys := GetNumKeys(page)
 
-	// binary search through the internal node keys
 	var low uint16 = 0
 	var high uint16 = numKeys
 
@@ -262,34 +268,52 @@ func InternalNodeFindChildSize(page *Page, key uint32) uint32 {
 		}
 	}
 
-	// low index points to the required target
 	return InternalNodeChild(page, low)
 }
 
-// updates the separator key at index keyNum
-func SetInternalNodeKey(page *Page, keyNum uint16, key uint32) {
-	numKeys := GetNumKeys(page)
-	childrenOffset := NodeHeaderSize + (uint32(numKeys+1) * InternalNodeChildSize)
-	keyOffset := childrenOffset + (uint32(keyNum) * InternalNodeKeySize)
-	binary.LittleEndian.PutUint32(page[keyOffset:keyOffset+InternalNodeKeySize], key)
-}
-
-// initialises new internal root page pointing to left and right child pages
-func CreateRootPage(pager *Pager, rootPageID uint32, leftChildID uint32, rightChildID uint32, splitKey uint32) error {
+// CreateRootNode initialises a new internal root page pointing to left and right child pages
+func CreateRootNode(pager *Pager, rootPageID uint32, leftChildID uint32, rightChildID uint32, splitKey uint32) error {
 	rootPage, err := pager.ReadPage(rootPageID)
 	if err != nil {
 		return err
 	}
 
-	// set Header metadata
 	SetNodeType(rootPage, NodeTypeInternal)
 	SetNumKeys(rootPage, 1)
 
-	// set child pointers and middle separator key
 	SetInternalNodeChild(rootPage, 0, leftChildID)
-	SetInternalNodeKey(rootPage, 0, splitKey)
 	SetInternalNodeChild(rootPage, 1, rightChildID)
+	SetInternalNodeKey(rootPage, 0, splitKey)
 
-	// root page to disk
 	return pager.WritePage(rootPageID, rootPage)
+}
+
+// BTreeSearch traverses from an internal node down to a leaf node to retrieve target row
+func BTreeSearch(pager *Pager, pageID uint32, key uint32) (*Row, error) {
+	page, err := pager.ReadPage(pageID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read page %d: %w", pageID, err)
+	}
+
+	nodeType := GetNodeType(page)
+
+	// Base Case: Leaf Node
+	if nodeType == NodeTypeLeaf {
+		slot, found := LeafNodeSearch(page, key)
+		if !found {
+			return nil, fmt.Errorf("key %d not found", key)
+		}
+		offset := NodeHeaderSize + (uint32(slot) * RowSize)
+		return Deserialize(page[offset : offset+RowSize])
+	}
+
+	// Recursive Case: Internal Node
+	childPageID := InternalNodeFindChild(page, key)
+
+	// Guard against infinite recursive loops
+	if childPageID == pageID {
+		return nil, fmt.Errorf("invalid routing: child page ID matches parent page ID %d", pageID)
+	}
+
+	return BTreeSearch(pager, childPageID, key)
 }

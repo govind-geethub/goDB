@@ -14,61 +14,60 @@ func main() {
 
 	page0, err := pager.ReadPage(0)
 	if err != nil {
-		log.Fatalf("failed to read page 0: %v", err)
+		log.Fatalf("Failed to read page 0: %v", err)
 	}
 
-	// initalize page 0 as Leaf if its New (0 Keys)
 	if GetNumKeys(page0) == 0 {
 		SetNodeType(page0, NodeTypeLeaf)
 	}
 
-	// insert 15 rows (1 -> 15) to trigger page split on the 15th row
-	fmt.Println("Inserting 15 rows into the database...")
+	// Insert 15 rows to trigger a split on the 15th key
+	fmt.Println("Inserting 15 rows into Database...")
 	for i := uint32(1); i <= 15; i++ {
 		row := Row{
 			ID:       i,
-			UserName: fmt.Sprintf("User_%d", i),
+			UserName: fmt.Sprintf("User %d", i),
 			Email:    fmt.Sprintf("user_%d@gmail.com", i),
 		}
 
-		// reload page 0 fresh
 		p0, err := pager.ReadPage(0)
 		if err != nil {
-			log.Fatalf("Failed to read page 0: %v", err)
+			log.Fatalf("Failed to read page 0 for row %d: %v", i, err)
 		}
 
-		// insert or split
+		// LeafNodeInsertOrSplit updates disk & reloads p0 if a split occurs
 		err = LeafNodeInsertOrSplit(pager, 0, p0, &row)
 		if err != nil {
-			log.Fatalf("failed on row %d: %v", i, err)
+			log.Fatalf("Failed on row %d: %v", i, err)
 		}
 
-		// persist the changes back to disk
-		err = pager.WritePage(0, p0)
+		// If no split occurred, write the updated page back to disk
+		if GetNumKeys(p0) < 14 {
+			_ = pager.WritePage(0, p0)
+		}
+	}
+
+	// Create Page 2 as the Internal Root Node
+	// Left child: Page 0 (IDs 1–7)
+	// Right child: Page 1 (IDs 8–15)
+	rootPageID := uint32(2)
+	splitKey := uint32(8)
+
+	err = CreateRootNode(pager, rootPageID, 0, 1, splitKey)
+	if err != nil {
+		log.Fatalf("Failed to create root node: %v", err)
+	}
+	fmt.Println("Created Internal Root Node (Page 2) -> Left: Page 0 | Split Key: 8 | Right: Page 1")
+
+	// Multilevel Tree traversal check
+	searchKeys := []uint32{4, 12, 15}
+	fmt.Println("\n--- Testing B-Tree Search from Root (Page 2) ---")
+	for _, k := range searchKeys {
+		row, err := BTreeSearch(pager, rootPageID, k)
 		if err != nil {
-			log.Fatalf("Failed to save page 0 state to disl: %v", err)
+			fmt.Printf("Search key %d: Error -> %v\n", k, err)
+		} else {
+			fmt.Printf("Search key %d: Found -> ID: %d, User: %s, Email: %s\n", k, row.ID, row.UserName, row.Email)
 		}
-	}
-
-	// verify page 0 contents
-	p0, _ := pager.ReadPage(0)
-	keysP0 := GetNumKeys(p0)
-	nextP0 := GetNextPage(p0)
-	fmt.Printf("\n --- Page 0 (Keys: %d, Next Page: %d) --- \n", keysP0, nextP0)
-	for i := uint16(0); i < keysP0; i++ {
-		offset := NodeHeaderSize + (uint32(i) * RowSize)
-		r, _ := Deserialize(p0[offset : offset+RowSize])
-		fmt.Printf("Slot %d -> ID: %d, User: %s\n", i, r.ID, r.UserName)
-	}
-
-	// verify page 1 contents (new sibling)
-	p1, _ := pager.ReadPage(1)
-	keysP1 := GetNumKeys(p1)
-	nextP1 := GetNextPage(p1)
-	fmt.Printf("\n --- Page 1 (Keys: %d, Next Page: %d) ---\n", keysP1, nextP1)
-	for i := uint16(0); i < keysP1; i++ {
-		offset := NodeHeaderSize + (uint32(i) * RowSize)
-		r, _ := Deserialize(p1[offset : offset+RowSize])
-		fmt.Printf("Slot %d -> ID: %d, User: %s\n", i, r.ID, r.UserName)
 	}
 }
