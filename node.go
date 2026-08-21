@@ -265,3 +265,31 @@ func InternalNodeFindChildSize(page *Page, key uint32) uint32 {
 	// low index points to the required target
 	return InternalNodeChild(page, low)
 }
+
+// updates the separator key at index keyNum
+func SetInternalNodeKey(page *Page, keyNum uint16, key uint32) {
+	numKeys := GetNumKeys(page)
+	childrenOffset := NodeHeaderSize + (uint32(numKeys+1) * InternalNodeChildSize)
+	keyOffset := childrenOffset + (uint32(keyNum) * InternalNodeKeySize)
+	binary.LittleEndian.PutUint32(page[keyOffset:keyOffset+InternalNodeKeySize], key)
+}
+
+// initialises new internal root page pointing to left and right child pages
+func CreateRootPage(pager *Pager, rootPageID uint32, leftChildID uint32, rightChildID uint32, splitKey uint32) error {
+	rootPage, err := pager.ReadPage(rootPageID)
+	if err != nil {
+		return err
+	}
+
+	// set Header metadata
+	SetNodeType(rootPage, NodeTypeInternal)
+	SetNumKeys(rootPage, 1)
+
+	// set child pointers and middle separator key
+	SetInternalNodeChild(rootPage, 0, leftChildID)
+	SetInternalNodeKey(rootPage, 0, splitKey)
+	SetInternalNodeChild(rootPage, 1, rightChildID)
+
+	// root page to disk
+	return pager.WritePage(rootPageID, rootPage)
+}
