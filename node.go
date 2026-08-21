@@ -206,3 +206,62 @@ func LeafNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newRow *Row) (
 
 	return newPageID, nil
 }
+
+// internal load layouts
+// header: 8 bytes(type, reserved, numKeys, nextPage)
+const (
+	InternalNodeKeySize   = 4
+	InternalNodeChildSize = 4
+)
+
+// internalNodeChild returns the page ID of child pointer at index childNum
+func InternalNodeChild(page *Page, childNum uint16) uint32 {
+	numKeys := GetNumKeys(page)
+	if childNum > numKeys {
+		panic(fmt.Sprintf("childNum %d out of bounds for numKeys %d", childNum, numKeys))
+	}
+
+	// children array starts right after the 8 byte header
+	offset := NodeHeaderSize + (uint32(childNum) * InternalNodeChildSize)
+	return binary.LittleEndian.Uint32(page[offset : offset+InternalNodeChildSize])
+}
+
+// SetInternalNodeChild updates child pointer at index childNum
+func SetInternalNodeChild(page *Page, childNum uint16, childPageID uint32) {
+	offset := NodeHeaderSize + (uint32(childNum) * InternalNodeChildSize)
+	binary.LittleEndian.PutUint32(page[offset:offset+InternalNodeChildSize], childPageID)
+}
+
+// internalNodeKey return the separator key at index keyNum
+func InternalNodeKey(page *Page, keyNum uint16) uint32 {
+	numKeys := GetNumKeys(page)
+
+	// Keys array starts after header + children pointers
+	// max children = max keys + 1
+	childrenOffset := NodeHeaderSize + (uint32(numKeys+1) * InternalNodeChildSize)
+	keyOffset := childrenOffset + (uint32(keyNum) * InternalNodeKeySize)
+	return binary.LittleEndian.Uint32(page[keyOffset : keyOffset+InternalNodeKeySize])
+}
+
+// InternalNodeFindChildSize returns the page ID that contains the taregt key
+func InternalNodeFindChildSize(page *Page, key uint32) uint32 {
+	numKeys := GetNumKeys(page)
+
+	// binary search through the internal node keys
+	var low uint16 = 0
+	var high uint16 = numKeys
+
+	for low < high {
+		mid := (low + high) / 2
+		k := InternalNodeKey(page, mid)
+
+		if k <= key {
+			low = mid + 1
+		} else {
+			high = mid
+		}
+	}
+
+	// low index points to the required target
+	return InternalNodeChild(page, low)
+}
