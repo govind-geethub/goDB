@@ -8,9 +8,8 @@ import (
 func main() {
 	pager, err := NewPager("test_btree.db")
 	if err != nil {
-		log.Fatalf("Failed to initliaze pager: %v", err)
+		log.Fatalf("Failed to initialize pager: %v", err)
 	}
-
 	defer pager.Close()
 
 	page0, err := pager.ReadPage(0)
@@ -23,18 +22,18 @@ func main() {
 		_ = pager.WritePage(0, page0)
 	}
 
-	// insert 15 rows to trigger split and root creation
-	fmt.Println("Inserting 15 rows into database...")
-	for i := uint32(1); i <= 15; i++ {
+	// Insert 50 rows to force multiple internal node cascading splits
+	fmt.Println("Inserting 50 rows into database...")
+	for i := uint32(1); i <= 50; i++ {
 		row := Row{
 			ID:       i,
 			UserName: fmt.Sprintf("User_%d", i),
-			Email:    fmt.Sprintf("user_%d_@gmail.com", i),
+			Email:    fmt.Sprintf("user_%d@gmail.com", i),
 		}
 
 		p0, err := pager.ReadPage(0)
 		if err != nil {
-			log.Fatalf("Failed to read page 0 for row %d: %v ", i, err)
+			log.Fatalf("Failed to read page 0: %v", err)
 		}
 
 		err = LeafNodeInsertOrSplit(pager, 0, p0, &row)
@@ -43,24 +42,31 @@ func main() {
 		}
 	}
 
-	// read root node ID from child
 	p0, err := pager.ReadPage(0)
 	if err != nil {
 		log.Fatalf("Failed to read page 0: %v", err)
 	}
 
-	rootPageID := GetParentPageID(p0)
-	fmt.Printf("Dynamic Root node created at page %d! \n", rootPageID)
+	// Walk parent links to find top Root ID dynamically
+	rootID := GetParentPageID(p0)
+	for {
+		parentPage, err := pager.ReadPage(rootID)
+		if err != nil || GetParentPageID(parentPage) == 0 {
+			break
+		}
+		rootID = GetParentPageID(parentPage)
+	}
 
-	// multi level tree traversal
-	searchKeys := []uint32{4, 8, 12, 15}
-	fmt.Println("\n --- Testing dynamic B-Tree search ---")
+	fmt.Printf("Tree successfully grew! Dynamic Root is now at Page %d\n\n", rootID)
+
+	searchKeys := []uint32{1, 15, 25, 42, 50}
+	fmt.Println("--- Testing Multi-Level B-Tree Search ---")
 	for _, k := range searchKeys {
-		row, err := BTreeSearch(pager, rootPageID, k)
+		row, err := BTreeSearch(pager, rootID, k)
 		if err != nil {
-			fmt.Printf("Search key %d: Error -> %v\n", k, err)
+			fmt.Printf("Search Key %d: Error -> %v\n", k, err)
 		} else {
-			fmt.Printf("Search Key %d: Found -> ID: %d, User: %s, Email: %s \n", k, row.ID, row.UserName, row.Email)
+			fmt.Printf("Search Key %d: Found -> ID: %d, User: %s, Email: %s\n", k, row.ID, row.UserName, row.Email)
 		}
 	}
 }

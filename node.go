@@ -174,7 +174,7 @@ func LeafNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newRow *Row) (
 	// Link old page to new page
 	SetNextPage(oldPage, newPageID)
 
-	// Clear old page payload (keep header bytes 0–7 intact)
+	// Clear old page payload (keep header bytes 0–10 intact)
 	for i := NodeHeaderSize; i < PageSize; i++ {
 		oldPage[i] = 0
 	}
@@ -251,10 +251,10 @@ func InternalNodeFindChild(page *Page, key uint32) uint32 {
 		mid := (low + high) / 2
 		k := InternalNodeKey(page, mid)
 
-		if key < k {
-			high = mid
-		} else {
+		if key > k {
 			low = mid + 1
+		} else {
+			high = mid
 		}
 	}
 
@@ -326,8 +326,8 @@ func InsertIntoParent(pager *Pager, leftID uint32, rightID uint32, key uint32) e
 
 	parentID := GetParentPageID(leftPage)
 
-	// Case 1: leftPage has no parent (splitting the root node)
-	if parentID == 0 && leftID == 0 {
+	// Case 1: Split Root Node
+	if parentID == 0 {
 		newRootID := uint32(pager.fileSize / PageSize)
 
 		if err := CreateRootNode(pager, newRootID, leftID, rightID, key); err != nil {
@@ -348,16 +348,53 @@ func InsertIntoParent(pager *Pager, leftID uint32, rightID uint32, key uint32) e
 		return pager.WritePage(rightID, rightPage)
 	}
 
-	// Case 2: parent already exists -> insert key and right child into parent
+	// Case 2: Insert into Existing Parent Node
 	parentPage, err := pager.ReadPage(parentID)
 	if err != nil {
 		return err
 	}
 
 	numKeys := GetNumKeys(parentPage)
-	SetInternalNodeChild(parentPage, numKeys+1, rightID)
-	SetInternalNodeKey(parentPage, numKeys, key)
-	SetNumKeys(parentPage, numKeys+1)
+
+	if numKeys >= uint16(MaxInternalChildren-1) {
+		_, err := InternalNodeSplit(pager, parentID, parentPage, rightID, key)
+		return err
+	}
+
+	// Read existing keys & children
+	keys := make([]uint32, 0, numKeys+1)
+	children := make([]uint32, 0, numKeys+2)
+
+	for i := uint16(0); i <= numKeys; i++ {
+		children = append(children, InternalNodeChild(parentPage, i))
+	}
+	for i := uint16(0); i < numKeys; i++ {
+		keys = append(keys, InternalNodeKey(parentPage, i))
+	}
+
+	// Insert sorted key & right child
+	inserted := false
+	for i, k := range keys {
+		if key < k {
+			keys = append(keys[:i], append([]uint32{key}, keys[i:]...)...)
+			children = append(children[:i+1], append([]uint32{rightID}, children[i+1:]...)...)
+			inserted = true
+			break
+		}
+	}
+	if !inserted {
+		keys = append(keys, key)
+		children = append(children, rightID)
+	}
+
+	// Write sorted values back to parent
+	SetNumKeys(parentPage, uint16(len(keys)))
+	for i := 0; i < len(keys); i++ {
+		SetInternalNodeKey(parentPage, uint16(i), keys[i])
+	}
+	for i := 0; i < len(children); i++ {
+		SetInternalNodeChild(parentPage, uint16(i), children[i])
+	}
 
 	rightPage, err := pager.ReadPage(rightID)
 	if err != nil {
@@ -370,4 +407,99 @@ func InsertIntoParent(pager *Pager, leftID uint32, rightID uint32, key uint32) e
 	}
 
 	return pager.WritePage(parentID, parentPage)
+}
+
+// Fixed InternalNodeSplit
+func InternalNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newChildID uint32, newKey uint32) (uint32, error) {
+	numKeys := GetNumKeys(oldPage)
+
+	keys := make([]uint32, 0, numKeys+1)
+	children := make([]uint32, 0, numKeys+2)
+
+	// Collect existing children and keys
+	for i := uint16(0); i <= numKeys; i++ {
+		children = append(children, InternalNodeChild(oldPage, i))
+	}
+	for i := uint16(0); i < numKeys; i++ {
+		keys = append(keys, InternalNodeKey(oldPage, i))
+	}
+
+	// Insert new key and right child in sorted order
+	inserted := false
+	for i, k := range keys {
+		if newKey < k {
+			keys = append(keys[:i], append([]uint32{newKey}, keys[i:]...)...)
+			children = append(children[:i+1], append([]uint32{newChildID}, children[i+1:]...)...)
+			inserted = true
+			break
+		}
+	}
+	if !inserted {
+		keys = append(keys, newKey)
+		children = append(children, newChildID)
+	}
+
+	// Allocate new right internal page
+	newPageID := uint32(pager.fileSize / PageSize)
+	newPage, err := pager.ReadPage(newPageID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to allocate new internal page: %w", err)
+	}
+
+	SetNodeType(newPage, NodeTypeInternal)
+	SetParentPageID(newPage, GetParentPageID(oldPage))
+
+	// Determine median promoted key index
+	midKeyIndex := len(keys) / 2
+	promotedKey := keys[midKeyIndex]
+
+	// Reset old internal page payload
+	for i := NodeHeaderSize; i < PageSize; i++ {
+		oldPage[i] = 0
+	}
+	SetNodeType(oldPage, NodeTypeInternal)
+
+	// Populate left internal page (oldPage)
+	for i := 0; i < midKeyIndex; i++ {
+		SetInternalNodeKey(oldPage, uint16(i), keys[i])
+	}
+	for i := 0; i <= midKeyIndex; i++ {
+		SetInternalNodeChild(oldPage, uint16(i), children[i])
+	}
+	SetNumKeys(oldPage, uint16(midKeyIndex))
+
+	// Populate right internal page (newPage)
+	rightKeyCount := len(keys) - midKeyIndex - 1
+	SetNumKeys(newPage, uint16(rightKeyCount))
+
+	for i := 0; i < rightKeyCount; i++ {
+		SetInternalNodeKey(newPage, uint16(i), keys[midKeyIndex+1+i])
+	}
+	for i := 0; i <= rightKeyCount; i++ {
+		childID := children[midKeyIndex+1+i]
+		SetInternalNodeChild(newPage, uint16(i), childID)
+
+		// Update child's parent pointer to new page ID
+		childPage, err := pager.ReadPage(childID)
+		if err == nil {
+			SetParentPageID(childPage, newPageID)
+			_ = pager.WritePage(childID, childPage)
+		}
+	}
+
+	// Flush pages to disk
+	if err := pager.WritePage(oldPageID, oldPage); err != nil {
+		return 0, err
+	}
+	if err := pager.WritePage(newPageID, newPage); err != nil {
+		return 0, err
+	}
+
+	// Pass promoted key up to parent
+	err = InsertIntoParent(pager, oldPageID, newPageID, promotedKey)
+	if err != nil {
+		return 0, fmt.Errorf("failed cascading internal split: %w", err)
+	}
+
+	return newPageID, nil
 }
