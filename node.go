@@ -13,11 +13,11 @@ const (
 
 // Header offsets inside the Page
 const (
-	HeaderTypeOffset = 0
-	HeaderRootOffset = 1
-	HeaderKeysOffset = 2
-	HeaderNextOffset = 4
-	NodeHeaderSize   = 8 // total bytes reserved for page metadata
+	HeaderTypeOffset   = 0
+	HeaderKeysOffset   = 1
+	HeaderParentOffset = 3
+	HeaderNextOffset   = 7
+	NodeHeaderSize     = 11 // total bytes reserved for page metadata
 )
 
 func GetNodeType(page *Page) byte {
@@ -204,6 +204,11 @@ func LeafNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newRow *Row) (
 		return 0, fmt.Errorf("failed to write new page: %w", err)
 	}
 
+	splitKey := rows[mid].ID
+	err = InsertIntoParent(pager, oldPageID, newPageID, splitKey)
+	if err != nil {
+		return 0, fmt.Errorf("failed to insert key %d into parent: %w", splitKey, err)
+	}
 	return newPageID, nil
 }
 
@@ -302,4 +307,67 @@ func BTreeSearch(pager *Pager, pageID uint32, key uint32) (*Row, error) {
 	}
 
 	return nil, fmt.Errorf("unknown node type %d on page %d", nodeType, pageID)
+}
+
+// parent page ID access
+func GetParentPageID(page *Page) uint32 {
+	return binary.LittleEndian.Uint32(page[HeaderParentOffset : HeaderParentOffset+4])
+}
+
+func SetParentPageID(page *Page, parentID uint32) {
+	binary.LittleEndian.PutUint32(page[HeaderParentOffset:HeaderParentOffset+4], parentID)
+}
+
+func InsertIntoParent(pager *Pager, leftID uint32, rightID uint32, key uint32) error {
+	leftPage, err := pager.ReadPage(leftID)
+	if err != nil {
+		return err
+	}
+
+	parentID := GetParentPageID(leftPage)
+
+	// Case 1: leftPage has no parent (splitting the root node)
+	if parentID == 0 && leftID == 0 {
+		newRootID := uint32(pager.fileSize / PageSize)
+
+		if err := CreateRootNode(pager, newRootID, leftID, rightID, key); err != nil {
+			return err
+		}
+
+		rightPage, err := pager.ReadPage(rightID)
+		if err != nil {
+			return err
+		}
+
+		SetParentPageID(leftPage, newRootID)
+		SetParentPageID(rightPage, newRootID)
+
+		if err := pager.WritePage(leftID, leftPage); err != nil {
+			return err
+		}
+		return pager.WritePage(rightID, rightPage)
+	}
+
+	// Case 2: parent already exists -> insert key and right child into parent
+	parentPage, err := pager.ReadPage(parentID)
+	if err != nil {
+		return err
+	}
+
+	numKeys := GetNumKeys(parentPage)
+	SetInternalNodeChild(parentPage, numKeys+1, rightID)
+	SetInternalNodeKey(parentPage, numKeys, key)
+	SetNumKeys(parentPage, numKeys+1)
+
+	rightPage, err := pager.ReadPage(rightID)
+	if err != nil {
+		return err
+	}
+
+	SetParentPageID(rightPage, parentID)
+	if err := pager.WritePage(rightID, rightPage); err != nil {
+		return err
+	}
+
+	return pager.WritePage(parentID, parentPage)
 }
