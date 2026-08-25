@@ -5,6 +5,33 @@ import (
 	"log"
 )
 
+// GetRootPageID walks parent pointers up to the top root node
+func GetRootPageID(pager *Pager) (uint32, error) {
+	p0, err := pager.ReadPage(0)
+	if err != nil {
+		return 0, err
+	}
+
+	rootID := GetParentPageID(p0)
+	if rootID == 0 {
+		return 0, nil
+	}
+
+	for {
+		parentPage, err := pager.ReadPage(rootID)
+		if err != nil {
+			return rootID, nil
+		}
+		parentOfParent := GetParentPageID(parentPage)
+		if parentOfParent == 0 {
+			break
+		}
+		rootID = parentOfParent
+	}
+
+	return rootID, nil
+}
+
 func main() {
 	pager, err := NewPager("test_btree.db")
 	if err != nil {
@@ -22,7 +49,7 @@ func main() {
 		_ = pager.WritePage(0, page0)
 	}
 
-	// Insert 50 rows to force multiple internal node cascading splits
+	// Insert 50 rows, traversing down from root to target leaf on each step
 	fmt.Println("Inserting 50 rows into database...")
 	for i := uint32(1); i <= 50; i++ {
 		row := Row{
@@ -31,30 +58,34 @@ func main() {
 			Email:    fmt.Sprintf("user_%d@gmail.com", i),
 		}
 
-		p0, err := pager.ReadPage(0)
+		// 1. Resolve current tree root dynamically
+		rootID, err := GetRootPageID(pager)
 		if err != nil {
-			log.Fatalf("Failed to read page 0: %v", err)
+			log.Fatalf("Failed to retrieve root page ID: %v", err)
 		}
 
-		err = LeafNodeInsertOrSplit(pager, 0, p0, &row)
+		// 2. Find correct leaf page target via B-Tree traversal
+		leafID, err := FindLeafPage(pager, rootID, row.ID)
+		if err != nil {
+			log.Fatalf("Failed to locate target leaf page for key %d: %v", row.ID, err)
+		}
+
+		// 3. Read leaf page and execute insertion/split
+		leafPage, err := pager.ReadPage(leafID)
+		if err != nil {
+			log.Fatalf("Failed to read leaf page %d: %v", leafID, err)
+		}
+
+		err = LeafNodeInsertOrSplit(pager, leafID, leafPage, &row)
 		if err != nil {
 			log.Fatalf("Failed on row %d: %v", i, err)
 		}
 	}
 
-	p0, err := pager.ReadPage(0)
+	// Fetch final top-level Root ID
+	rootID, err := GetRootPageID(pager)
 	if err != nil {
-		log.Fatalf("Failed to read page 0: %v", err)
-	}
-
-	// Walk parent links to find top Root ID dynamically
-	rootID := GetParentPageID(p0)
-	for {
-		parentPage, err := pager.ReadPage(rootID)
-		if err != nil || GetParentPageID(parentPage) == 0 {
-			break
-		}
-		rootID = GetParentPageID(parentPage)
+		log.Fatalf("Failed to retrieve root page ID: %v", err)
 	}
 
 	fmt.Printf("Tree successfully grew! Dynamic Root is now at Page %d\n\n", rootID)

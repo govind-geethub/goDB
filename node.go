@@ -251,7 +251,7 @@ func InternalNodeFindChild(page *Page, key uint32) uint32 {
 		mid := (low + high) / 2
 		k := InternalNodeKey(page, mid)
 
-		if key > k {
+		if key >= k {
 			low = mid + 1
 		} else {
 			high = mid
@@ -502,4 +502,21 @@ func InternalNodeSplit(pager *Pager, oldPageID uint32, oldPage *Page, newChildID
 	}
 
 	return newPageID, nil
+}
+
+// FindLeafPage recursively walks down internal nodes starting from pageID to locate the target leaf node for a given key
+func FindLeafPage(pager *Pager, pageID uint32, key uint32) (uint32, error) {
+	page, err := pager.ReadPage(pageID)
+	if err != nil {
+		return 0, err
+	}
+
+	// Base Case: We hit a Leaf Node
+	if GetNodeType(page) == NodeTypeLeaf {
+		return pageID, nil
+	}
+
+	// Recursive Case: Route down using internal child pointer
+	childID := InternalNodeFindChild(page, key)
+	return FindLeafPage(pager, childID, key)
 }
