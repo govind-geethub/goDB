@@ -100,4 +100,14 @@ func main() {
 			fmt.Printf("Search Key %d: Found -> ID: %d, User: %s, Email: %s\n", k, row.ID, row.UserName, row.Email)
 		}
 	}
+
+	fmt.Println("\n --- Testing range scan (keys 10 - 25) ---")
+	rows, err := BtTreeScanRange(pager, rootID, 10, 25)
+	if err != nil {
+		log.Fatalf("Range scan failed : %v", err)
+	}
+
+	for _, r := range rows {
+		fmt.Printf("ID: %d | User: %s | Email: %s\n", r.ID, r.UserName, r.Email)
+	}
 }

@@ -520,3 +520,46 @@ func FindLeafPage(pager *Pager, pageID uint32, key uint32) (uint32, error) {
 	childID := InternalNodeFindChild(page, key)
 	return FindLeafPage(pager, childID, key)
 }
+
+// scan search given start to endKey
+func BtTreeScanRange(pager *Pager, rootID uint32, startKey uint32, endKey uint32) ([]Row, error) {
+	if startKey > endKey {
+		return nil, fmt.Errorf("Invalid Range start %d > end %d", startKey, endKey)
+	}
+
+	// locate the inital page
+	currPageID, err := FindLeafPage(pager, rootID, startKey)
+	if err != nil {
+		return nil, fmt.Errorf("Failed to find the start leaf page: %w", err)
+	}
+
+	var results []Row
+
+	// traverse accross leaf nodes using nextPage pointers
+	for currPageID != 0 {
+		page, err := pager.ReadPage(currPageID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read leaf page %d: %w", currPageID, err)
+		}
+
+		numKeys := GetNumKeys(page)
+		for i := uint16(0); i < numKeys; i++ {
+			offset := NodeHeaderSize + (uint32(i) * RowSize)
+			row, err := Deserialize(page[offset : offset+RowSize])
+			if err != nil {
+				return nil, fmt.Errorf("Failed to Deserialize row: %w", err)
+			}
+
+			if row.ID >= startKey && row.ID <= endKey {
+				results = append(results, *row)
+			}
+
+			if row.ID > endKey {
+				return results, nil
+			}
+		}
+
+		currPageID = GetNextPage(page)
+	}
+	return results, nil
+}
