@@ -522,12 +522,12 @@ func FindLeafPage(pager *Pager, pageID uint32, key uint32) (uint32, error) {
 }
 
 // scan search given start to endKey
-func BtTreeScanRange(pager *Pager, rootID uint32, startKey uint32, endKey uint32) ([]Row, error) {
+func BTreeScanRange(pager *Pager, rootID uint32, startKey uint32, endKey uint32) ([]Row, error) {
 	if startKey > endKey {
 		return nil, fmt.Errorf("Invalid Range start %d > end %d", startKey, endKey)
 	}
 
-	// locate the inital page
+	// Locate the initial page containing startKey
 	currPageID, err := FindLeafPage(pager, rootID, startKey)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to find the start leaf page: %w", err)
@@ -535,8 +535,8 @@ func BtTreeScanRange(pager *Pager, rootID uint32, startKey uint32, endKey uint32
 
 	var results []Row
 
-	// traverse accross leaf nodes using nextPage pointers
-	for currPageID != 0 {
+	// Traverse leaf nodes using GetNextPage pointers
+	for {
 		page, err := pager.ReadPage(currPageID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read leaf page %d: %w", currPageID, err)
@@ -545,21 +545,60 @@ func BtTreeScanRange(pager *Pager, rootID uint32, startKey uint32, endKey uint32
 		numKeys := GetNumKeys(page)
 		for i := uint16(0); i < numKeys; i++ {
 			offset := NodeHeaderSize + (uint32(i) * RowSize)
-			row, err := Deserialize(page[offset : offset+RowSize])
-			if err != nil {
-				return nil, fmt.Errorf("Failed to Deserialize row: %w", err)
-			}
+			rowID := binary.LittleEndian.Uint32(page[offset : offset+4])
 
-			if row.ID >= startKey && row.ID <= endKey {
+			if rowID >= startKey && rowID <= endKey {
+				row, err := Deserialize(page[offset : offset+RowSize])
+				if err != nil {
+					return nil, fmt.Errorf("Deserialization error: %w", err)
+				}
 				results = append(results, *row)
 			}
 
-			if row.ID > endKey {
+			if rowID > endKey {
 				return results, nil
 			}
 		}
 
-		currPageID = GetNextPage(page)
+		// Advance to next leaf page
+		nextPage := GetNextPage(page)
+		if nextPage == 0 {
+			break // No more linked leaf pages
+		}
+		currPageID = nextPage
 	}
+
 	return results, nil
+}
+
+// GetRootPageID returns the top root page ID.
+// If Page 0 has no parent, Page 0 IS the root page.
+func GetRootPageID(pager *Pager) (uint32, error) {
+	p0, err := pager.ReadPage(0)
+	if err != nil {
+		return 0, err
+	}
+
+	parentID := GetParentPageID(p0)
+
+	// Base case: If Page 0 has no parent, Page 0 is the root node
+	if parentID == 0 {
+		return 0, nil
+	}
+
+	// Walk up parent pointers to find the top root
+	currID := parentID
+	for {
+		parentPage, err := pager.ReadPage(currID)
+		if err != nil {
+			return currID, nil
+		}
+		nextParent := GetParentPageID(parentPage)
+		if nextParent == 0 {
+			break
+		}
+		currID = nextParent
+	}
+
+	return currID, nil
 }
