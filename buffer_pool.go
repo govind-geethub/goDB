@@ -12,7 +12,7 @@ type CacheFrame struct {
 	isDirty bool
 }
 
-type bufferPool struct {
+type BufferPool struct {
 	capacity int
 	pager    *Pager
 	cache    map[uint32]*list.Element
@@ -20,8 +20,8 @@ type bufferPool struct {
 	mu       sync.Mutex
 }
 
-func NewBufferPool(capacity int, pager *Pager) *bufferPool {
-	return &bufferPool{
+func NewBufferPool(capacity int, pager *Pager) *BufferPool {
+	return &BufferPool{
 		capacity: capacity,
 		pager:    pager,
 		cache:    make(map[uint32]*list.Element),
@@ -30,7 +30,7 @@ func NewBufferPool(capacity int, pager *Pager) *bufferPool {
 }
 
 // retrieves page from memory, or if missed then from disk
-func (bp *bufferPool) FetchPage(pageID uint32) (*Page, error) {
+func (bp *BufferPool) FetchPage(pageID uint32) (*Page, error) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
@@ -67,7 +67,7 @@ func (bp *bufferPool) FetchPage(pageID uint32) (*Page, error) {
 }
 
 // marks a page in cache as modified so it flushes to disk on eviction
-func (bp *bufferPool) MarkDIrty(pageID uint32) {
+func (bp *BufferPool) MarkDirty(pageID uint32) {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
@@ -78,7 +78,7 @@ func (bp *bufferPool) MarkDIrty(pageID uint32) {
 }
 
 // flushes dirty page if modified, then removes oldest frame from cache
-func (bp *bufferPool) evictLRU() error {
+func (bp *BufferPool) evictLRU() error {
 	backElem := bp.lruList.Back()
 	if backElem == nil {
 		return nil
@@ -97,7 +97,7 @@ func (bp *bufferPool) evictLRU() error {
 }
 
 // writes all modified dirty pages in the pool to disk
-func (bp *bufferPool) FlushAll() error {
+func (bp *BufferPool) FlushAll() error {
 	bp.mu.Lock()
 	defer bp.mu.Unlock()
 
