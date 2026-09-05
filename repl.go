@@ -8,19 +8,19 @@ import (
 	"strings"
 )
 
-func StartREPL(pager *Pager) {
+func StartREPL(pool *BufferPool) {
 	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Println("===================================")
-	fmt.Println("Custom B+ Tree Storage Engine REPL")
-	fmt.Println("Commands: ")
-	fmt.Println("	 insert <id> <username> <email>")
-	fmt.Println("	 select <id>")
-	fmt.Println("	 scan <id>")
-	fmt.Println("	 exit")
-	fmt.Println("===================================")
+	fmt.Println("============================================")
+	fmt.Println(" Custom B+ Tree Storage Engine REPL")
+	fmt.Println(" Commands:")
+	fmt.Println("   insert <id> <username> <email>")
+	fmt.Println("   select <id>")
+	fmt.Println("   scan <start_id> <end_id>")
+	fmt.Println("   exit")
+	fmt.Println("============================================")
 
 	for {
-		fmt.Println("db > ")
+		fmt.Print("db > ")
 		if !scanner.Scan() {
 			break
 		}
@@ -35,15 +35,15 @@ func StartREPL(pager *Pager) {
 			break
 		}
 
-		HandleCommand(pager, line)
+		handleCommand(pool, line)
 	}
 }
 
-func HandleCommand(pager *Pager, input string) {
+func handleCommand(pool *BufferPool, input string) {
 	parts := strings.Fields(input)
 	command := strings.ToLower(parts[0])
 
-	rootID, err := GetRootPageID(pager)
+	rootID, err := GetRootPageID(pool)
 	if err != nil {
 		fmt.Printf("Error resolving root: %v\n", err)
 		return
@@ -52,10 +52,9 @@ func HandleCommand(pager *Pager, input string) {
 	switch command {
 	case "insert":
 		if len(parts) < 4 {
-			fmt.Printf("Usage: insert <id> <username> <email>")
+			fmt.Println("Usage: insert <id> <username> <email>")
 			return
 		}
-
 		id, err := strconv.ParseUint(parts[1], 10, 32)
 		if err != nil {
 			fmt.Println("Invalid ID")
@@ -68,23 +67,23 @@ func HandleCommand(pager *Pager, input string) {
 			Email:    parts[3],
 		}
 
-		leafID, err := FindLeafPage(pager, rootID, row.ID)
+		leafID, err := FindLeafPage(pool, rootID, row.ID)
 		if err != nil {
 			fmt.Printf("Error locating leaf: %v\n", err)
 			return
 		}
 
-		leafPage, err := pager.ReadPage(leafID)
+		leafPage, err := pool.FetchPage(leafID)
 		if err != nil {
-			fmt.Printf("Error reading page: %v\n", err)
+			fmt.Printf("Error fetching page: %v\n", err)
 			return
 		}
 
-		err = LeafNodeInsertOrSplit(pager, leafID, leafPage, &row)
+		err = LeafNodeInsertOrSplit(pool, leafID, leafPage, &row)
 		if err != nil {
 			fmt.Printf("Insert failed: %v\n", err)
 		} else {
-			fmt.Println("Executed")
+			fmt.Println("Executed.")
 		}
 
 	case "select":
@@ -98,38 +97,37 @@ func HandleCommand(pager *Pager, input string) {
 			return
 		}
 
-		row, err := BTreeSearch(pager, rootID, uint32(id))
+		row, err := BTreeSearch(pool, rootID, uint32(id))
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 		} else {
-			fmt.Printf("ID: %d | UserName: %s | Email: %s\n", row.ID, row.UserName, row.Email)
+			fmt.Printf("ID: %d | Username: %s | Email: %s\n", row.ID, row.UserName, row.Email)
 		}
 
 	case "scan":
 		if len(parts) < 3 {
-			fmt.Println("Usage: scan <startID> <endID>")
+			fmt.Println("Usage: scan <start_id> <end_id>")
 			return
 		}
-
 		start, err1 := strconv.ParseUint(parts[1], 10, 32)
 		end, err2 := strconv.ParseUint(parts[2], 10, 32)
-
 		if err1 != nil || err2 != nil {
-			fmt.Println("Invalid Range bounds")
+			fmt.Println("Invalid range bounds")
 			return
 		}
 
-		rows, err := BTreeScanRange(pager, rootID, uint32(start), uint32(end))
+		rows, err := BTreeScanRange(pool, rootID, uint32(start), uint32(end))
 		if err != nil {
 			fmt.Printf("Scan error: %v\n", err)
 			return
 		}
 
-		fmt.Printf("Found %d rows: \n", len(rows))
+		fmt.Printf("Found %d rows:\n", len(rows))
 		for _, r := range rows {
-			fmt.Printf(" ID: %d | UserName: %s | Email: %s\n", r.ID, r.UserName, r.Email)
+			fmt.Printf("  ID: %d | Username: %s | Email: %s\n", r.ID, r.UserName, r.Email)
 		}
+
 	default:
-		fmt.Printf("Unrecongnised Command '%s' \n", command)
+		fmt.Printf("Unrecognized command '%s'\n", command)
 	}
 }
